@@ -26,13 +26,18 @@ logging requirement).
 
 ``Q(SCV)`` and ``Q(meson)`` are the conserved charge ``60 - sum_r [<Z_i(r)> + <Z_o(r)>]/2``
 of each run -- equivalently the total occupation ``sum_j n(j)``. Both are exactly 60 under the
-true dynamics, so ``drift`` (the larger deviation of the two) is a reference-free
-truncation-error estimate available at any depth. See
+true dynamics, so ``drift`` (the larger deviation of the two) is a correctness invariant: a
+nonzero value at shallow depth means something is broken. It is *not* a truncation-error
+estimate -- see
 [propagate.Run.charge_drift][benches.hadron.propagate.Run.charge_drift].
 
 ``--two-qubit-error`` turns on H3's depolarizing damping (see ``noise.py``), which should be
 compared against the QPU column rather than the classical ones. ``--two-qubit-error 0`` is its
 noiseless control: same layer-by-layer propagation, no channel.
+
+``--basis majorana`` propagates in the Majorana basis instead (see ``majorana.py``), with
+``--cutoff-type`` selecting what ``--cutoff`` counts there. Cutoff numbers are *not* comparable
+between the bases, so compare error against the ``peak`` column, never at equal cutoff.
 """
 
 from __future__ import annotations
@@ -41,6 +46,7 @@ import argparse
 import csv
 from pathlib import Path
 
+from benches.hadron.majorana import run as majorana_run
 from benches.hadron.propagate import run
 
 _HADRON_DIR = Path(__file__).parent
@@ -68,7 +74,12 @@ def main() -> None:
         default=[1, 2],
         help="Trotter layer counts to run",
     )
-    parser.add_argument("--cutoff", type=int, default=1000, help="Pauli-weight cutoff")
+    parser.add_argument(
+        "--cutoff",
+        type=int,
+        default=1000,
+        help="weight cutoff: Pauli weight, or --cutoff-type in the majorana basis",
+    )
     parser.add_argument(
         "--lower-atol", type=float, default=None, help="coefficient-magnitude cutoff"
     )
@@ -78,7 +89,24 @@ def main() -> None:
         default=None,
         help="depolarizing error per two-qubit gate (H3); omit for the one-shot noiseless path",
     )
+    parser.add_argument(
+        "--basis",
+        choices=("pauli", "majorana"),
+        default="pauli",
+        help="propagation basis (section 8); majorana has no noise channel",
+    )
+    parser.add_argument(
+        "--cutoff-type",
+        choices=("length", "support"),
+        default="length",
+        help="what --cutoff counts in the majorana basis; ignored for pauli",
+    )
     args = parser.parse_args()
+
+    if args.basis == "majorana" and args.two_qubit_error is not None:
+        raise SystemExit(
+            "--two-qubit-error is Pauli-side only; H3 has no Majorana path"
+        )
 
     if not (_CIRCUITS_DIR / "x_100_SCV.qasm").exists():
         raise SystemExit(
@@ -92,13 +120,22 @@ def main() -> None:
     print(columns)
     print("-" * len(columns))
     for layers in args.layers:
-        outcome = run(
-            _CIRCUITS_DIR,
-            max_layers=layers,
-            cutoff=args.cutoff,
-            lower_atol=args.lower_atol,
-            two_qubit_error=args.two_qubit_error,
-        )
+        if args.basis == "majorana":
+            outcome = majorana_run(
+                _CIRCUITS_DIR,
+                max_layers=layers,
+                cutoff=args.cutoff,
+                lower_atol=args.lower_atol,
+                cutoff_type=args.cutoff_type,
+            )
+        else:
+            outcome = run(
+                _CIRCUITS_DIR,
+                max_layers=layers,
+                cutoff=args.cutoff,
+                lower_atol=args.lower_atol,
+                two_qubit_error=args.two_qubit_error,
+            )
         row = _load_benchmark_row(layers)
         print(
             f"{layers:>4}  {outcome.n_f:>11.6f}  {float(row['TN']):>9.5f}  "

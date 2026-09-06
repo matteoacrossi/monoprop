@@ -33,6 +33,18 @@ Add `--two-qubit-error 2e-3` to switch on H3's depolarizing damping, and compare
 against the `QPU` column rather than the classical ones. `--two-qubit-error 0` is its noiseless
 control: the same layer-by-layer propagation with the channel switched off.
 
+`--basis majorana` propagates in the Majorana basis (section 8) instead, with `--cutoff-type
+length|support` choosing what `--cutoff` counts there:
+
+```bash
+uv run --group hadron python -m benches.hadron.example \
+  --basis majorana --layers 1 2 3 --cutoff 10 --lower-atol 1e-7
+```
+
+Cutoff numbers mean different things in the two bases, so compare error against the `peak`
+column, never at equal `--cutoff`. Past ~4 layers give it a budget (`--cutoff`/`--lower-atol`)
+in either basis; the default `--cutoff 1000` is unbounded and will exhaust memory.
+
 ## Layout
 
 - `qasm_frontend.py` -- OPENQASM 2.0 parsing: state-prep split, gate histograms, and
