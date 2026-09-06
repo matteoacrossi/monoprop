@@ -48,6 +48,9 @@ control: the same layer-by-layer propagation with the channel switched off.
   Pauli weight rather than its weight in the reduced frame.
 - `propagate.py` -- the driver: parses a circuit prefix, builds the reduced `monoprop.Circuit`,
   and propagates `n_f(t)` through it, in one shot or layer by layer with damping.
+- `majorana.py` -- the same circuit in the Majorana basis (section 8), via `MajoranaPropagator`:
+  Jordan-Wigner generators, the paired-monomial expectation evaluator, and the generator
+  length histogram.
 - `example.py` -- a small CLI wrapping `propagate.py`, printing `n_f(t)` next to the published
   benchmark table for a few chosen layer counts (see "Quick example" above).
 - `fetch_fixtures.sh` -- reproduces the `.cache/` clone (QASM circuits + `lsh_data` h5 files).
@@ -74,9 +77,9 @@ Tests that need the external fixtures skip cleanly (with a message pointing at
   at 2-3 layers) in `test_milestones.py`.
 - **T6** (noise-aware propagation, H3): tested, results below. Its acceptance criterion is
   **not** met, though the hypothesis is directionally confirmed.
-- **T4b, T5** and the secondary Pauli-vs-Majorana comparison (plan sections 6 and 8): not
-  started, but see the note on the conserved charge below, which gives T5 a reference-free
-  error axis it did not have.
+- **Section 8** (Pauli vs Majorana truncation): done, and the answer is negative -- the Pauli
+  basis wins at every budget. Results below.
+- **T4b, T5**: not started.
 
 ## T6 / H3: does noise make Pauli propagation easier?
 
@@ -134,6 +137,62 @@ QPU residual as pure decay (relevant to H2).
 simulation at all, and with no cost saving, since a uniform rescale does not preferentially
 damp the terms that branch. Only the weight-dependent channel is informative. See
 `noise.py`'s module docstring.
+
+## Section 8: Pauli vs Majorana truncation
+
+**Diagnostic 1 (the gate) passes handsomely.** Of the 536 generators in a Trotter layer, the
+Majorana length histogram is `{2: 360, 4: 60, 6: 116}` -- **67% are quadratic**. A quadratic
+generator is Gaussian, and Gaussian conjugation sends each `m_k` to a length-1 combination of
+Majoranas, so it preserves a monomial's length exactly: two thirds of the gates cannot push a
+term over a length cutoff at all. That is the structural reason the plan was looking for, well
+beyond the mere reordering argument. By angle, the split is telling: the mass term (`0.03`, 120
+gates) is *entirely* quadratic, while the interaction term (`0.15`, the largest angle and so the
+strongest branching) splits 120 quadratic against 116 of length 6.
+
+**Diagnostic 2 refutes it anyway.** At depth 3 with the coefficient threshold pinned at `1e-7`
+-- so the weight cutoff is the only thing that differs -- against the exact reference
+`n_f(3) = 0.690355102`:
+
+| basis | cutoff | peak terms | error |
+|---|---|---|---|
+| majorana | 4 | 180 | 4.7e-01 |
+| **pauli** | **4** | **467** | **4.8e-07** |
+| majorana | 6 | 557 | 4.0e-04 |
+| majorana | 8 | 1,611 | 4.1e-04 |
+| majorana | 10 | 1,787 | 5.1e-09 |
+| pauli | 6 | 1,833 | 1.5e-10 |
+| majorana | 12 | 2,695 | 1.5e-10 |
+
+Read down the cost column, since cutoff numbers are not comparable across bases. Pauli reaches
+`4.8e-07` on 467 terms; Majorana needs 1,787 terms -- **3.8x the cost** -- before it beats that,
+and at comparable cost (557 terms) it is `4.0e-04`, three orders of magnitude worse. The Pauli
+basis dominates at every budget, so the 67% quadratic fraction does not convert into an
+advantage.
+
+**Why, and it is not the reason the plan gives.** The plan frames the asymmetry as
+diagonal-versus-hopping: `X_j X_{j+1}` is Majorana length 2 where `Z_j Z_{j+1}` is length 4.
+True for *adjacent* pairs, but the dominant effect on a 120-site chain is the Jordan-Wigner
+tail. An isolated `X_2` is Pauli weight 1 and Majorana length **5**, because the string of `Z`s
+back to the origin must be paid for; `X_0 X_2` is weight 2 and length 4. The penalty scales with
+a term's *span along the ordering*, and only `Z`-like letters escape it. A length cutoff
+therefore charges terms for where they sit on the chain, which on 60 sites is punitive and has
+nothing to do with the physics. `test_majorana.py` pins these numbers.
+
+Two consequences worth carrying forward: **cutoff numbers are meaningless across bases** (only
+error-vs-cost is), and neither Majorana notion equals Pauli weight -- `cutoff_type="support"`
+counts the orbitals of the *Majorana monomial*, which the tail inflates too (an `X_2` touches 3).
+
+The comparison is only meaningful because the two bases agree *exactly* untruncated -- identical
+`n_f` to 16 digits and an identical retained term count (16 at one layer, 2,963 at depth 3 with
+`atol=1e-7`), as the bijection demands. That equality is the real test of the generator
+conversion, the Jordan-Wigner phases and the paired-monomial evaluator, all of which are easy
+to get subtly wrong.
+
+One loose end: in a clean back-to-back run the Majorana propagator was ~2x faster in wall clock
+at an *identical* term count (47s against 95s at depth 3, unbounded). If that holds up it is an
+engine-level difference rather than a truncation one, and it would partly offset the accuracy
+gap. The sweep's own timings above were taken under background load and should not be trusted
+for this; it needs a clean measurement before anyone leans on it.
 
 ### A conserved charge, for free
 
