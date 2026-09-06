@@ -115,12 +115,14 @@ def test_cutoff_numbers_are_not_comparable_across_bases() -> None:
     error against *cost*, never at equal cutoff numbers.
 
     The plan frames the asymmetry as diagonal-versus-hopping -- ``X_j X_{j+1}`` is Majorana
-    length 2 where ``Z_j Z_{j+1}`` is length 4 -- and that holds for *adjacent* pairs. But the
-    dominant effect on a 120-site chain is the Jordan-Wigner tail: an isolated ``X_2`` is Pauli
-    weight 1 and Majorana length 5, because the string of ``Z``s back to the origin has to be
-    paid for. The penalty scales with a term's span along the ordering, and only ``Z``-like
-    letters escape it. That, rather than the diagonal/hopping split, is what makes the Majorana
-    length cutoff lose here.
+    length 2 where ``Z_j Z_{j+1}`` is length 4 -- and that holds for *adjacent* pairs. The
+    Jordan-Wigner tail adds a second effect: an isolated ``X_2`` is Pauli weight 1 and Majorana
+    length 5, because the string of ``Z``s back to the origin has to be paid for.
+
+    Neither is what decides the section-8 comparison. On the real evolved operator length only
+    reaches about twice the weight, and it is the *scatter* around that -- weight 4 spanning
+    lengths 2 to 12 -- that makes a length cutoff select differently from a weight cutoff. See
+    the README.
     """
     assert _weight_length_support("XX", (0, 1)) == (2, 2, 2)
     assert _weight_length_support("ZZ", (0, 1)) == (2, 4, 2)

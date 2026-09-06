@@ -181,18 +181,41 @@ and at comparable cost (557 terms) it is `4.0e-04`, three orders of magnitude wo
 basis dominates at every budget, so the 67% quadratic fraction does not convert into an
 advantage.
 
-**Why, and it is not the reason the plan gives.** The plan frames the asymmetry as
-diagonal-versus-hopping: `X_j X_{j+1}` is Majorana length 2 where `Z_j Z_{j+1}` is length 4.
-True for *adjacent* pairs, but the dominant effect on a 120-site chain is the Jordan-Wigner
-tail. An isolated `X_2` is Pauli weight 1 and Majorana length **5**, because the string of `Z`s
-back to the origin must be paid for; `X_0 X_2` is weight 2 and length 4. The penalty scales with
-a term's *span along the ordering*, and only `Z`-like letters escape it. A length cutoff
-therefore charges terms for where they sit on the chain, which on 60 sites is punitive and has
-nothing to do with the physics. `test_majorana.py` pins these numbers.
+**Why.** Not the Jordan-Wigner tail, which is the first suspect and the wrong one. The tail is
+real in principle -- an isolated `X_2` is Pauli weight 1 and Majorana length 5, since the string
+of `Z`s back to the origin must be paid for -- but it does not dominate here. Measured on the
+depth-3 evolved operator, length tracks weight at roughly 2x and no worse: weight 10 reaches
+length 18, not the ~span blowup the tail argument predicts, because the terms stay `Z`-rich and
+spatially contiguous.
+
+The actual mechanism is the *scatter* around that 2x relationship, and its direction. At weight
+4 the evolved terms carry lengths anywhere from 2 to 12. A length cutoff therefore does not
+rescale the weight cutoff, it makes a **different selection**: it keeps compact high-weight
+terms (weight 8 at length 8) while discarding spread-out low-weight ones (weight 4 at length
+12). For a hadron propagating along the lattice the spread-out low-weight terms are exactly the
+ones carrying the signal, so the trade goes the wrong way. Comparing at matched *effective*
+weight makes it plain -- Majorana length 8 admits about what Pauli weight 4 does, yet costs
+1,611 terms against 467 and is three orders of magnitude less accurate.
 
 Two consequences worth carrying forward: **cutoff numbers are meaningless across bases** (only
 error-vs-cost is), and neither Majorana notion equals Pauli weight -- `cutoff_type="support"`
 counts the orbitals of the *Majorana monomial*, which the tail inflates too (an `X_2` touches 3).
+
+**Would going back to the Hamiltonian help?** Probably not, and the measurement above is why:
+the compiled circuit is not what is hurting the Majorana basis. Its reduced generators have
+qubit span at most 3 (240 at span 0, 120 at 1, 60 at 2, 116 at 3) and Majorana length at most 6,
+so the routing swaps and `cx` ladders were entirely absorbed by the Clifford reduction and the
+generators are already as local as a Hamiltonian-derived set would be. Rebuilding the Trotter
+unitary from `FermiOperator` terms would recover the *grouping* the compilation dissolved -- a
+hopping term as one quadratic fermionic generator instead of two separate Pauli rotations --
+but monoprop's monomial propagator branches per rotation either way, so the grouping buys
+nothing on its own. It would also violate section 9's first pitfall: the QASM is the
+specification, and a re-derived Hamiltonian may not be the one they ran.
+
+The lever the 67% quadratic fraction actually points at is algorithmic, not a basis or a
+front-end choice: treat the Gaussian part exactly (covariance-matrix evolution) and the 116
+non-Gaussian rotations perturbatively. That is a different simulator, not a different basis for
+this one.
 
 The comparison is only meaningful because the two bases agree *exactly* untruncated -- identical
 `n_f` to 16 digits and an identical retained term count (16 at one layer, 2,963 at depth 3 with
