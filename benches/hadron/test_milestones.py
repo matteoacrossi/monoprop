@@ -30,7 +30,7 @@ from pathlib import Path
 import h5py
 import pytest
 
-from benches.hadron.propagate import n_f_at_layer
+from benches.hadron.propagate import n_f_at_layer, run
 from benches.hadron.qasm_frontend import split_state_prep
 
 
@@ -68,6 +68,23 @@ _BUDGET = {1: (1000, None), 2: (20, 1e-5), 3: (12, 1e-4)}
 # computation's -- PP_CPU (which PP_stagg equals) also uses "a cap on retained terms, calibrated
 # by extrapolation from small systems" per the plan's fixtures section, not an exact result.
 _MAX_SITE_ERROR = {1: 1e-6, 2: 1e-3, 3: 5e-3}
+
+
+def test_conserved_charge_is_exact_when_nothing_is_truncated(
+    circuits_dir: Path,
+) -> None:
+    """``60 - sum_r [<Z_i(r)> + <Z_o(r)>]/2`` is a conserved charge of these dynamics.
+
+    Exact at an unbounded cutoff, so its drift under a real budget is a truncation-error
+    estimate that needs no reference data at all -- see
+    [propagate.Run.charge_drift][benches.hadron.propagate.Run.charge_drift]. Individual Pauli
+    rotations in the reduced circuit do *not* conserve it (a lone ``XX`` anticommutes with
+    ``Z_1 + Z_2``); it is conserved once a whole layer is applied, which is exactly where the
+    channel and the measurement sit.
+    """
+    outcome = run(circuits_dir, max_layers=1, cutoff=1000)
+    assert outcome.charge_scv == pytest.approx(60.0, abs=1e-12)
+    assert outcome.charge_meson == pytest.approx(60.0, abs=1e-12)
 
 
 @pytest.mark.parametrize("max_layers", [1, 2, 3])

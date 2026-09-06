@@ -49,6 +49,7 @@ import monoprop
 from benches.hadron.qasm_frontend import gate_name, gate_qubits
 
 _CLIFFORD_GATES = {"h": HGate(), "cx": CXGate(), "x": XGate(), "swap": SwapGate()}
+_SWAP_AS_TWO_QUBIT_GATES = 3
 
 
 @dataclass(frozen=True, slots=True)
@@ -76,10 +77,18 @@ class ReducedBody:
         final_clifford: The accumulated Clifford (``D_final``) of every ``h``/``cx``/``x``/
             ``swap`` gate consumed. Reduce an output-time observable through it with
             [reduce_output_pauli][] before backpropagating through [rotations][].
+        layer_cliffords: The Clifford accumulated up to the end of each layer -- entry ``l`` is
+            every Clifford gate strictly before that layer's last ``rz``. Conjugating by it maps
+            a term held at that boundary back to the physical frame (see [noise][]). The last
+            entry equals [final_clifford][], since reduction stops at the last consumed ``rz``.
+        layer_two_qubit_gates: Two-qubit gates in each layer, counting a ``swap`` as three, for
+            sizing a per-layer error rate.
     """
 
     rotations: list[PauliRotation]
     final_clifford: Clifford
+    layer_cliffords: list[Clifford]
+    layer_two_qubit_gates: list[int]
 
 
 def _z_at(qubit: int, num_qubits: int) -> _QiskitPauli:
@@ -149,7 +158,10 @@ def reduce_body(
     """
     cliff = Clifford.from_label("I" * num_qubits)
     rotations: list[PauliRotation] = []
+    layer_cliffords: list[Clifford] = []
+    layer_two_qubit_gates: list[int] = []
     rz_count_in_layer = 0
+    two_qubit_in_layer = 0
     layers_done = 0
     for line in body_lines:
         if max_layers is not None and layers_done >= max_layers:
@@ -165,9 +177,21 @@ def reduce_body(
             if rz_count_in_layer % rz_per_layer == 0:
                 rz_count_in_layer = 0
                 layers_done += 1
+                layer_cliffords.append(cliff)
+                layer_two_qubit_gates.append(two_qubit_in_layer)
+                two_qubit_in_layer = 0
             continue
+        if name == "cx":
+            two_qubit_in_layer += 1
+        elif name == "swap":
+            two_qubit_in_layer += _SWAP_AS_TWO_QUBIT_GATES
         cliff = cliff.compose(_CLIFFORD_GATES[name], qargs=list(qubits))
-    return ReducedBody(rotations=rotations, final_clifford=cliff)
+    return ReducedBody(
+        rotations=rotations,
+        final_clifford=cliff,
+        layer_cliffords=layer_cliffords,
+        layer_two_qubit_gates=layer_two_qubit_gates,
+    )
 
 
 def build_circuit(

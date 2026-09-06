@@ -23,16 +23,25 @@ Usage (from the repository root -- needs the package-qualified ``-m`` form to re
 Prints n_f(t) for each requested layer count next to the published TN/PP_CPU/PP_GPU/QPU
 values from lsh_x100_benchmark.csv, plus wall-clock time and retained term count (T4a's
 logging requirement).
+
+``Q(SCV)`` and ``Q(meson)`` are the conserved charge ``60 - sum_r [<Z_i(r)> + <Z_o(r)>]/2``
+of each run -- equivalently the total occupation ``sum_j n(j)``. Both are exactly 60 under the
+true dynamics, so ``drift`` (the larger deviation of the two) is a reference-free
+truncation-error estimate available at any depth. See
+[propagate.Run.charge_drift][benches.hadron.propagate.Run.charge_drift].
+
+``--two-qubit-error`` turns on H3's depolarizing damping (see ``noise.py``), which should be
+compared against the QPU column rather than the classical ones. ``--two-qubit-error 0`` is its
+noiseless control: same layer-by-layer propagation, no channel.
 """
 
 from __future__ import annotations
 
 import argparse
 import csv
-import time
 from pathlib import Path
 
-from benches.hadron.propagate import n_f_at_layer
+from benches.hadron.propagate import run
 
 _HADRON_DIR = Path(__file__).parent
 _CIRCUITS_DIR = (
@@ -63,6 +72,12 @@ def main() -> None:
     parser.add_argument(
         "--lower-atol", type=float, default=None, help="coefficient-magnitude cutoff"
     )
+    parser.add_argument(
+        "--two-qubit-error",
+        type=float,
+        default=None,
+        help="depolarizing error per two-qubit gate (H3); omit for the one-shot noiseless path",
+    )
     args = parser.parse_args()
 
     if not (_CIRCUITS_DIR / "x_100_SCV.qasm").exists():
@@ -70,23 +85,27 @@ def main() -> None:
             f"fixtures missing; run {_HADRON_DIR / 'fetch_fixtures.sh'} first"
         )
 
-    header = f"{'step':>4}  {'n_f (mine)':>12}  {'TN':>10}  {'PP_CPU':>10}  {'PP_GPU':>10}  {'QPU':>10}  {'time':>7}"
-    print(header)
-    print("-" * len(header))
+    columns = (
+        f"{'step':>4}  {'n_f (mine)':>11}  {'TN':>9}  {'PP_GPU':>9}  {'QPU':>9}"
+        f"  {'Q(SCV)':>12}  {'Q(meson)':>12}  {'drift':>9}  {'peak':>9}  {'time':>7}"
+    )
+    print(columns)
+    print("-" * len(columns))
     for layers in args.layers:
-        t0 = time.time()
-        n_f, _ = n_f_at_layer(
+        outcome = run(
             _CIRCUITS_DIR,
             max_layers=layers,
             cutoff=args.cutoff,
             lower_atol=args.lower_atol,
+            two_qubit_error=args.two_qubit_error,
         )
-        elapsed = time.time() - t0
         row = _load_benchmark_row(layers)
         print(
-            f"{layers:>4}  {n_f:>12.6f}  {float(row['TN']):>10.6f}  "
-            f"{float(row['PP_CPU']):>10.6f}  {float(row['PP_GPU']):>10.6f}  "
-            f"{float(row['QPU']):>10.6f}  {elapsed:>6.1f}s"
+            f"{layers:>4}  {outcome.n_f:>11.6f}  {float(row['TN']):>9.5f}  "
+            f"{float(row['PP_GPU']):>9.5f}  {float(row['QPU']):>9.5f}  "
+            f"{outcome.charge_scv:>12.8f}  {outcome.charge_meson:>12.8f}  "
+            f"{outcome.charge_drift:>9.2e}  {outcome.peak_terms:>9,}  "
+            f"{outcome.seconds:>6.1f}s"
         )
 
 
