@@ -163,6 +163,21 @@ So it is a free smoke alarm and a strong end-to-end check on the site mapping, t
 frames, the signs and the channel -- any of which would break it -- but it is no substitute for
 a convergence study, and T5 still needs one.
 
+What it *does* track is depth. At a fixed `cutoff=20, lower_atol=1e-5`, the symmetry violation
+climbs by eleven orders of magnitude from step 1 to step 8 -- and the damped run violates it
+consistently *less*, by 5x at step 8:
+
+| step | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 |
+|---|---|---|---|---|---|---|---|---|
+| noiseless | 7e-15 | 7e-15 | 3e-11 | 1e-07 | 2e-05 | 3e-05 | 2e-05 | 6.8e-04 |
+| noisy 2e-3 | 1e-14 | 1e-14 | 6e-11 | 2e-05 | 5e-05 | 9e-05 | 1e-04 | 1.4e-04 |
+
+This is the cleanest support for H3's "truncation becomes a controlled approximation" clause --
+cleaner than the term-count ratio, because it is measured against an exact symmetry rather than
+against another truncated run. Damping does not merely cost less; at equal budget it keeps a
+conserved quantity conserved better. (Steps 4-7 are the exception, where the damped run drifts
+slightly more -- the crossover only sets in once accumulated damping outweighs it.)
+
 It survives the channel too: both initial states are exactly half filled, so `sum_j <Z_j> = 0`
 at `t = 0`, and depolarizing scales that zero sum to zero. Handy here, but a property of this
 half-filled instance rather than a general guarantee.
