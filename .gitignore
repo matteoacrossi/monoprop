@@ -175,6 +175,10 @@ sandbox/**
 benches/results/**
 !benches/results/README.md
 
+# benches/hadron/'s external fixtures (QASM circuits, reference h5 data); fetch with
+# benches/hadron/fetch_fixtures.sh
+benches/hadron/.cache/
+
 # devcontainer files
 .devcontainer/devcontainer-lock.json
 

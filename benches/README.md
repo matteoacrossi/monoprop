@@ -10,10 +10,14 @@ documentation for detailed instructions.
 
 ## What lives where
 
-This directory holds only monoprop's own benchmarks — `conftest.py` (the fixtures
-and the results schema), `bench_random.py`, `bench_models.py`,
-[`LADDER.md`](LADDER.md) (the benchmark ladder for sensitive pull requests: the
-groups, their flags and their shapes) and `results/`.
+Monoprop's own Bencher-tracked benchmarks live directly in this directory —
+`conftest.py` (the fixtures and the results schema), `bench_random.py`,
+`bench_models.py`, [`LADDER.md`](LADDER.md) (the benchmark ladder for sensitive
+pull requests: the groups, their flags and their shapes) and `results/`.
+
+[`hadron/`](hadron/) is a separate, self-contained research reproduction (not
+part of the Bencher-tracked suite, not using this directory's `conftest.py`) —
+see [`hadron/README.md`](hadron/README.md).
 
 Both bench modules measure the same four operations — `build_graph`, `propagate`,
 `energy` and `gradient` — so a number means the same thing whichever problem

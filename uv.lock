@@ -1092,6 +1092,17 @@ docs = [
     { name = "pytest-markdown-docs" },
     { name = "qiskit" },
 ]
+hadron = [
+    { name = "h5py" },
+    { name = "psutil" },
+    { name = "pytest" },
+    { name = "pytest-cases" },
+    { name = "pytest-cov" },
+    { name = "pytest-datadir" },
+    { name = "pytest-mpi" },
+    { name = "qiskit" },
+    { name = "tabulate" },
+]
 interactive = [
     { name = "ipykernel" },
     { name = "matplotlib" },
@@ -1154,6 +1165,17 @@ docs = [
     { name = "pyscf" },
     { name = "pytest-markdown-docs" },
     { name = "qiskit", specifier = ">=2.0.0" },
+]
+hadron = [
+    { name = "h5py", specifier = ">=3.10" },
+    { name = "psutil", specifier = ">=7.2" },
+    { name = "pytest", specifier = ">=8.2.2,<9.1" },
+    { name = "pytest-cases", specifier = ">=3.8.6,<4" },
+    { name = "pytest-cov", specifier = ">=7.1.0" },
+    { name = "pytest-datadir" },
+    { name = "pytest-mpi", git = "https://github.com/aragilar/pytest-mpi.git?rev=nonzero" },
+    { name = "qiskit", specifier = ">=2.0.0" },
+    { name = "tabulate", specifier = ">=0.9" },
 ]
 interactive = [
     { name = "ipykernel" },
