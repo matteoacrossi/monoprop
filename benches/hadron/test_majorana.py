@@ -89,12 +89,18 @@ def test_quadratic_fraction_of_the_generators(circuits_dir: Path) -> None:
 def test_majorana_reproduces_pauli_exactly_when_untruncated(
     circuits_dir: Path,
 ) -> None:
-    """Jordan-Wigner is a bijection, so untruncated the two bases must agree term for term."""
+    """Jordan-Wigner is a bijection, so untruncated the two bases must agree term for term.
+
+    To rounding rather than to the bit: the Pauli side contracts in the engine while this one
+    materialises the operator and sums it in Python, and against ``PP_stagg`` (exact at one layer)
+    those land within ``1.1e-16`` and ``7.8e-13`` respectively. The bijection claim is carried by
+    the term count below, which *is* exact.
+    """
     pauli = pauli_run(circuits_dir, max_layers=1, cutoff=1000)
     mine = majorana.run(circuits_dir, max_layers=1)
-    assert mine.n_f == pytest.approx(pauli.n_f, abs=1e-12)
+    assert mine.n_f == pytest.approx(pauli.n_f, abs=1e-11)
     for got, expected in zip(mine.per_site, pauli.per_site, strict=True):
-        assert got == pytest.approx(expected, abs=1e-12)
+        assert got == pytest.approx(expected, abs=1e-11)
     # Same branching tree, hence the same retained term count -- not merely the same answer.
     assert mine.peak_terms == pauli.peak_terms
 

@@ -15,9 +15,12 @@
 """Driver tying qasm_frontend, pauli_frontend and observable together (T4 and T6 of the plan).
 
 Propagates the differential ``n_f(t)`` observable through the first ``max_layers`` Trotter
-layers of the SU(2) LSH hadron-dynamics circuit, using one [PauliPropagator][monoprop.pauli_propagator.PauliPropagator]
-run per output wire (shared between the SCV and meson evaluations, per section 3 of the plan --
-back-propagate once, evaluate against both product states).
+layers of the SU(2) LSH hadron-dynamics circuit, with one
+[PauliPropagator][monoprop.pauli_propagator.PauliPropagator] run per output wire and reference
+state. Section 3 of the plan shares a single backpropagation between the SCV and meson
+evaluations, on the assumption that evolving dominates evaluating; measured, it is the other way
+round, so the default path evolves twice and contracts in the engine instead -- see
+[_propagate_wire_contracted][].
 
 Two propagation paths. The default consumes the whole reduced circuit in one propagator. Giving
 [run][]'s ``two_qubit_error`` instead consumes one Trotter layer at a time so that H3's
@@ -27,6 +30,8 @@ the noiseless control for that path, and must agree with the default to truncati
 
 from __future__ import annotations
 
+import hashlib
+import pickle
 from dataclasses import dataclass
 from pathlib import Path
 from time import perf_counter
@@ -35,8 +40,10 @@ import monoprop
 from benches.hadron import noise
 from benches.hadron.observable import occupation, site_diff
 from benches.hadron.pauli_frontend import (
+    PauliRotation,
     ReducedBody,
     build_circuit,
+    fuse_rotations,
     reduce_body,
     reduce_output_pauli,
 )
@@ -44,6 +51,38 @@ from benches.hadron.qasm_frontend import split_state_prep
 
 NUM_QUBITS = 120
 RZ_PER_LAYER = 536
+
+#: Disk cache for [_reduce_body_cached][], gitignored alongside the rest of ``.cache/``.
+_REDUCED_BODY_CACHE_DIR = Path(__file__).parent / ".cache" / "reduced_body"
+
+
+def _reduce_body_cached(
+    body: list[str], *, num_qubits: int, rz_per_layer: int, max_layers: int | None
+) -> ReducedBody:
+    """Cache-wrapped [reduce_body][benches.hadron.pauli_frontend.reduce_body].
+
+    The reduction depends only on ``body``, ``num_qubits``, ``rz_per_layer`` and ``max_layers``
+    -- never on ``atol``, ``cutoff`` or which wire -- so it is deterministic and safe to pickle:
+    at 20 layers it is ~200s to compute against under 0.05s to reload from a ~1.8MB file. The
+    cache key hashes ``body`` itself rather than trusting a filename, so a changed fixture cannot
+    silently return a stale reduction.
+    """
+    digest = hashlib.sha256("\n".join(body).encode()).hexdigest()[:16]
+    cache_path = (
+        _REDUCED_BODY_CACHE_DIR
+        / f"{digest}_L{max_layers}_n{num_qubits}_rz{rz_per_layer}.pkl"
+    )
+    if cache_path.exists():
+        with cache_path.open("rb") as f:
+            return pickle.load(f)  # noqa: S301
+    reduced = reduce_body(
+        body, num_qubits=num_qubits, rz_per_layer=rz_per_layer, max_layers=max_layers
+    )
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    with cache_path.open("wb") as f:
+        pickle.dump(reduced, f)
+    return reduced
+
 
 #: Per layer boundary: the channel's ``(probability, frame mask table)``, or ``None`` for none.
 _LayerDamping = tuple[float, noise.MaskTable] | None
@@ -94,21 +133,26 @@ class Run:
         return max(abs(self.charge_scv - exact), abs(self.charge_meson - exact))
 
 
-def _layer_circuits(
-    reduced: ReducedBody, *, initial_state: tuple[int, ...]
-) -> list[monoprop.Circuit]:
-    """Split the reduced rotations into one circuit per Trotter layer, in circuit order.
+def _fused_layers(reduced: ReducedBody) -> list[list[PauliRotation]]:
+    """The reduced rotations, split per Trotter layer and fused within each layer.
 
     Every ``rz`` reduces to exactly one rotation, so layer ``l`` owns rotations
-    ``[RZ_PER_LAYER * l, RZ_PER_LAYER * (l + 1))``.
+    ``[RZ_PER_LAYER * l, RZ_PER_LAYER * (l + 1))`` before fusing. Fusing per layer rather than
+    over the whole body keeps the boundaries where [noise][] applies the channel intact.
     """
     return [
-        build_circuit(
-            reduced.rotations[start : start + RZ_PER_LAYER],
-            num_qubits=NUM_QUBITS,
-            initial_state=initial_state,
-        )
+        fuse_rotations(reduced.rotations[start : start + RZ_PER_LAYER])
         for start in range(0, len(reduced.rotations), RZ_PER_LAYER)
+    ]
+
+
+def _layer_circuits(
+    layers: list[list[PauliRotation]], *, initial_state: tuple[int, ...]
+) -> list[monoprop.Circuit]:
+    """One circuit per Trotter layer, in circuit order."""
+    return [
+        build_circuit(layer, num_qubits=NUM_QUBITS, initial_state=initial_state)
+        for layer in layers
     ]
 
 
@@ -171,6 +215,37 @@ def _propagate_wire(
     return operator, peak, total
 
 
+def _propagate_wire_contracted(
+    circuit_scv: monoprop.Circuit,
+    circuit_meson: monoprop.Circuit,
+    initial_operator: monoprop.PauliOperator,
+    *,
+    cutoff: int,
+    lower_atol: float | None,
+) -> tuple[float, float, int, int]:
+    """Backpropagate one wire once per reference state, contracting inside the engine.
+
+    [PauliPropagator.evolved_operator][monoprop.pauli_propagator.PauliPropagator] marshals every
+    retained term into Python, which at 4e5 terms costs ~8s against ~0.4s to propagate the wire.
+    Evolving twice and contracting in the engine is therefore an order of magnitude cheaper than
+    sharing one evolution between the two reference states and summing its terms here, which
+    inverts the trade section 3 of the plan assumed.
+
+    Returns:
+        ``(expval_scv, expval_meson, peak_terms, total_terms)``. Heisenberg evolution never reads
+        the reference state, so both propagators retain exactly the same terms and the count is
+        taken once rather than doubled.
+    """
+    propagators = [
+        monoprop.PauliPropagator.from_circuit(
+            circuit, initial_operator, cutoff=cutoff, lower_atol=lower_atol
+        )
+        for circuit in (circuit_scv, circuit_meson)
+    ]
+    size = propagators[0].size()
+    return propagators[0].expval(), propagators[1].expval(), size, size
+
+
 def run(
     circuits_dir: str | Path,
     *,
@@ -201,7 +276,7 @@ def run(
     scv_prep, body = split_state_prep(circuits_dir / "x_100_SCV.qasm")
     meson_prep, _ = split_state_prep(circuits_dir / "x_100_meson.qasm")
 
-    reduced = reduce_body(
+    reduced = _reduce_body_cached(
         body, num_qubits=NUM_QUBITS, rz_per_layer=RZ_PER_LAYER, max_layers=max_layers
     )
 
@@ -210,14 +285,21 @@ def run(
     peak_terms = 0
     total_terms = 0
 
+    # The damped path applies the channel to the operator between layers (see [noise][]), which
+    # needs the terms in Python; the default path never does, so it contracts in the engine.
+    layers = _fused_layers(reduced)
+    circuit_meson: monoprop.Circuit | None = None
     if two_qubit_error is None:
-        circuit = build_circuit(
-            reduced.rotations, num_qubits=NUM_QUBITS, initial_state=scv_prep
+        rotations = [rotation for layer in layers for rotation in layer]
+        circuits = [
+            build_circuit(rotations, num_qubits=NUM_QUBITS, initial_state=scv_prep)
+        ]
+        circuit_meson = build_circuit(
+            rotations, num_qubits=NUM_QUBITS, initial_state=meson_prep
         )
-        circuits = [circuit]
         damping: list[_LayerDamping] = [None]
     else:
-        circuits = _layer_circuits(reduced, initial_state=scv_prep)
+        circuits = _layer_circuits(layers, initial_state=scv_prep)
         damping = _damping_plan(reduced, two_qubit_error)
 
     scv_occupied = set(scv_prep)
@@ -225,11 +307,26 @@ def run(
     for wire in range(NUM_QUBITS):
         pauli, sign = reduce_output_pauli(reduced.final_clifford, wire, NUM_QUBITS)
         initial_operator = monoprop.PauliOperator({pauli: sign}, num_qubits=NUM_QUBITS)
-        evolved, peak, total = _propagate_wire(
-            circuits, damping, initial_operator, cutoff=cutoff, lower_atol=lower_atol
-        )
-        occupation_scv[wire] = occupation(evolved, scv_occupied)
-        occupation_meson[wire] = occupation(evolved, meson_occupied)
+        if circuit_meson is not None:
+            expval_scv, expval_meson, peak, total = _propagate_wire_contracted(
+                circuits[0],
+                circuit_meson,
+                initial_operator,
+                cutoff=cutoff,
+                lower_atol=lower_atol,
+            )
+            occupation_scv[wire] = (1 - expval_scv) / 2
+            occupation_meson[wire] = (1 - expval_meson) / 2
+        else:
+            evolved, peak, total = _propagate_wire(
+                circuits,
+                damping,
+                initial_operator,
+                cutoff=cutoff,
+                lower_atol=lower_atol,
+            )
+            occupation_scv[wire] = occupation(evolved, scv_occupied)
+            occupation_meson[wire] = occupation(evolved, meson_occupied)
         peak_terms = max(peak_terms, peak)
         total_terms += total
 

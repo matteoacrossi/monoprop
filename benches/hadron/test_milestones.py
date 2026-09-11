@@ -30,6 +30,13 @@ from pathlib import Path
 import h5py
 import pytest
 
+import monoprop
+from benches.hadron.pauli_frontend import (
+    build_circuit,
+    fuse_rotations,
+    reduce_body,
+    reduce_output_pauli,
+)
 from benches.hadron.propagate import n_f_at_layer, run
 from benches.hadron.qasm_frontend import split_state_prep
 
@@ -123,3 +130,29 @@ def test_t4a_scalar_n_f_matches_pp_gpu(
         circuits_dir, max_layers=max_layers, cutoff=cutoff, lower_atol=lower_atol
     )
     assert n_f == pytest.approx(target_n_f, abs=5e-3)
+
+
+def test_fusion_is_exact_and_reduces_the_rotation_count(circuits_dir: Path) -> None:
+    """[fuse_rotations][benches.hadron.pauli_frontend.fuse_rotations] must not move the answer.
+
+    Merging repeated generators is algebraically exact, so an untruncated run has to reproduce
+    the unfused one to the bit -- not merely to a tolerance. Guarding the count as well keeps a
+    silently-no-op fusion from passing.
+    """
+    scv_prep, body = split_state_prep(circuits_dir / "x_100_SCV.qasm")
+    reduced = reduce_body(body, num_qubits=120, rz_per_layer=536, max_layers=1)
+    fused = fuse_rotations(reduced.rotations)
+    assert len(fused) == 416, "expected a 536 -> 416 reduction for one Trotter layer"
+
+    pauli, sign = reduce_output_pauli(reduced.final_clifford, 60, 120)
+    operator = monoprop.PauliOperator({pauli: sign}, num_qubits=120)
+    expvals = [
+        monoprop.PauliPropagator.from_circuit(
+            build_circuit(rotations, num_qubits=120, initial_state=scv_prep),
+            operator,
+            cutoff=1000,
+            lower_atol=None,
+        ).expval()
+        for rotations in (reduced.rotations, fused)
+    ]
+    assert expvals[0] == expvals[1]
