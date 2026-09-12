@@ -351,6 +351,7 @@ flake8-annotations.allow-star-arg-any = true
 # example.py is a CLI reporting script: printing its results is the point (T201).
 "benches/hadron/example.py" = ["T201"]
 "benches/hadron/mpi_sweep.py" = ["T201"]
+"benches/hadron/roulette.py" = ["T201"]
 # the report renderer writes to stdout by design (T201) and the MPI communicator
 # type is unavoidably dynamic (ANN401).
 "packages/monoprop-bench-tools/src/**" = ["ANN401", "T201"]
