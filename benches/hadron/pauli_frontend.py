@@ -156,9 +156,15 @@ def reduce_body(
     Returns:
         The reduced rotations and the leftover Clifford transform.
     """
-    cliff = Clifford.from_label("I" * num_qubits)
+    # The accumulated frame is carried as D^-1 rather than D. Both give the same generator --
+    # evolve(D, frame="h") and evolve(D^-1, frame="s") are both D^dag Z_k D -- but only the
+    # second is the direction a stabilizer tableau already stores, so qiskit answers it by
+    # reading the tableau instead of rebuilding a 120-qubit adjoint on every rz. That adjoint
+    # was 17.5ms x one per rz = 188s of the 200s this function used to cost. Every gate here is
+    # self-inverse, so inverting the accumulation is just composing onto the front.
+    inverse = Clifford.from_label("I" * num_qubits)
     rotations: list[PauliRotation] = []
-    layer_cliffords: list[Clifford] = []
+    layer_inverses: list[Clifford] = []
     layer_two_qubit_gates: list[int] = []
     rz_count_in_layer = 0
     two_qubit_in_layer = 0
@@ -169,7 +175,7 @@ def reduce_body(
         name = gate_name(line)
         qubits = gate_qubits(line)
         if name == "rz":
-            frame = _z_at(qubits[0], num_qubits).evolve(cliff, frame="h")
+            frame = _z_at(qubits[0], num_qubits).evolve(inverse, frame="s")
             pauli, sign = _to_monoprop_pauli(frame.to_label(), num_qubits)
             angle = float(line[line.index("(") + 1 : line.index(")")])
             rotations.append(PauliRotation(pauli, angle, sign))
@@ -177,7 +183,7 @@ def reduce_body(
             if rz_count_in_layer % rz_per_layer == 0:
                 rz_count_in_layer = 0
                 layers_done += 1
-                layer_cliffords.append(cliff)
+                layer_inverses.append(inverse)
                 layer_two_qubit_gates.append(two_qubit_in_layer)
                 two_qubit_in_layer = 0
             continue
@@ -185,10 +191,12 @@ def reduce_body(
             two_qubit_in_layer += 1
         elif name == "swap":
             two_qubit_in_layer += _SWAP_AS_TWO_QUBIT_GATES
-        cliff = cliff.compose(_CLIFFORD_GATES[name], qargs=list(qubits))
+        inverse = inverse.compose(_CLIFFORD_GATES[name], qargs=list(qubits), front=True)
+    # Callers hold D, not D^-1, so pay the adjoint here -- once per layer rather than per rz.
+    layer_cliffords = [c.adjoint() for c in layer_inverses]
     return ReducedBody(
         rotations=rotations,
-        final_clifford=cliff,
+        final_clifford=inverse.adjoint(),
         layer_cliffords=layer_cliffords,
         layer_two_qubit_gates=layer_two_qubit_gates,
     )
