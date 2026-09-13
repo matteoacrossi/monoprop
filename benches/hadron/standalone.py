@@ -62,14 +62,20 @@ from time import perf_counter
 from qiskit import QuantumCircuit, qasm2
 from qiskit.quantum_info import Clifford, Pauli, SparsePauliOp
 from qiskit.transpiler import PassManager
-from qiskit.transpiler.passes import LitinskiTransformation
+from qiskit.transpiler.passes import CommutativeOptimization, LitinskiTransformation
 
 import monoprop
 
 NUM_QUBITS = 120
 NUM_SITES = NUM_QUBITS // 2
 
-Rotation = tuple[monoprop.Pauli, float]
+#: Commute every Clifford to the end, then merge rotations that repeat a generator.
+REDUCE = PassManager(
+    [
+        LitinskiTransformation(fix_clifford=True, use_ppr=True, insert_barrier=True),
+        CommutativeOptimization(),
+    ]
+)
 
 
 def load(path: Path) -> tuple[tuple[int, ...], QuantumCircuit]:
@@ -97,93 +103,49 @@ def load(path: Path) -> tuple[tuple[int, ...], QuantumCircuit]:
     return tuple(sorted(q for q, n in flips.items() if n % 2 == 1)), body
 
 
-def to_rotations(body: QuantumCircuit) -> tuple[list[Rotation], Clifford]:
-    """Commute every Clifford to the end, returning the rotations and that final Clifford.
+def reduce(
+    body: QuantumCircuit, initial_states: dict[str, tuple[int, ...]]
+) -> tuple[dict[str, monoprop.Circuit], Clifford]:
+    """Rewrite the body as Pauli rotations, one circuit per reference state.
 
-    Each rotation comes back as ``(generator, signed angle)`` on the full register. The pass
-    emits them in the DAG's topological order rather than the QASM's sequential one; the two
-    orders differ only by transpositions of commuting rotations, so the product is the same.
+    Two transpiler passes do the work. [LitinskiTransformation][] commutes all 21,350 Clifford
+    gates to the end, turning each ``rz`` into one Pauli product rotation; ``CommutativeOptimization``
+    then merges generators that repeat with only commuting rotations between them, which is exact
+    -- ``exp(-i a P) exp(-i b P) = exp(-i (a + b) P)`` -- and takes 10,720 rotations down to 8,320.
+    Propagation cost tracks the rotation count, so that is worth ~1.28x.
+
+    The rotations are emitted in the DAG's topological order rather than the circuit's. The two
+    differ only by transpositions of commuting rotations, so the operator is the same; it does
+    mean the order crosses Trotter-layer boundaries, which is harmless only because nothing here
+    acts at one. Merging is likewise safe across the whole body for that reason.
     """
-    transformed = PassManager(
-        [LitinskiTransformation(fix_clifford=True, use_ppr=True, insert_barrier=True)]
-    ).run(body)
+    transformed = REDUCE.run(body)
     index = {bit: position for position, bit in enumerate(transformed.qubits)}
     split = next(
         k for k, i in enumerate(transformed.data) if i.operation.name == "barrier"
     )
-
-    rotations = []
-    for instruction in transformed.data[:split]:
-        label = instruction.operation.pauli().to_label()
-        sign = -1.0 if label.startswith("-") else 1.0
-        label = label.lstrip("+-")
-        qubits = [index[bit] for bit in instruction.qubits]
-        # a qiskit label runs last-operand-first over the gate's own qubits
-        letters = [
-            (qubits[len(label) - 1 - k], letter)
-            for k, letter in enumerate(label)
-            if letter != "I"
-        ]
-        pauli = monoprop.Pauli(
-            "".join(letter for _, letter in letters),
-            tuple(qubit for qubit, _ in letters),
-        )
-        rotations.append((pauli, sign * float(instruction.operation.params[0])))
-
-    tail = QuantumCircuit(NUM_QUBITS)
-    for instruction in transformed.data[split + 1 :]:
-        tail.append(instruction.operation, [index[bit] for bit in instruction.qubits])
-    return rotations, Clifford(tail)
-
-
-def fuse(rotations: list[Rotation]) -> list[Rotation]:
-    """Merge repeated generators separated only by rotations that commute with them.
-
-    Exact, not an approximation: ``exp(-i a P) exp(-i b P) = exp(-i (a + b) P)``, and a rotation
-    slides past any rotation whose generator commutes with it -- two Paulis commute when they
-    differ on an even number of shared qubits. Worth doing because propagation cost tracks the
-    rotation count. Fusing across the whole body is only safe because nothing here acts at a
-    Trotter boundary; with a noise channel between layers it would have to be done per layer.
-    """
-    fused: list[Rotation] = []
-    keys: list[dict[int, str]] = []
-    for pauli, angle in rotations:
-        key = dict(zip(pauli.qubits, pauli.string, strict=True))
-        for i in reversed(range(len(fused))):
-            if keys[i] == key:
-                total = fused[i][1] + angle
-                if total == 0.0:
-                    del fused[i], keys[i]
-                else:
-                    fused[i] = (fused[i][0], total)
-                break
-            if sum(1 for q, p in key.items() if keys[i].get(q, p) != p) % 2:
-                fused.append((pauli, angle))
-                keys.append(key)
-                break
-        else:
-            fused.append((pauli, angle))
-            keys.append(key)
-    return fused
-
-
-def build_circuit(
-    rotations: list[Rotation], initial_state: tuple[int, ...]
-) -> monoprop.Circuit:
-    """A monoprop circuit of ExpGates, one per rotation.
-
-    ExpGate applies ``exp(+i theta H)``, so ``H = -0.5 P`` driven by the signed angle reproduces
-    the ``exp(-i theta P / 2)`` the Pauli product rotations denote.
-    """
-    return monoprop.Circuit(
-        gates=tuple(
-            monoprop.ExpGate(monoprop.PauliOperator({p: -0.5}, num_qubits=NUM_QUBITS))
-            for p, _ in rotations
-        ),
-        system_size=NUM_QUBITS,
-        parameters=tuple(angle for _, angle in rotations),
-        initial_state=initial_state,
+    rotations, tail = QuantumCircuit(NUM_QUBITS), QuantumCircuit(NUM_QUBITS)
+    for k, instruction in enumerate(transformed.data):
+        target = rotations if k < split else tail
+        if instruction.operation.name != "barrier":
+            target.append(
+                instruction.operation, [index[bit] for bit in instruction.qubits]
+            )
+    # The two reference states share every rotation and differ only in what they start from, so
+    # the passes and the conversion run once and the gates are handed to both circuits.
+    converted = monoprop.from_qiskit_circuit(
+        rotations, list(next(iter(initial_states.values())))
     )
+    circuits = {
+        name: monoprop.Circuit(
+            gates=converted.gates,
+            system_size=NUM_QUBITS,
+            parameters=converted.parameters,
+            initial_state=state,
+        )
+        for name, state in initial_states.items()
+    }
+    return circuits, Clifford(tail)
 
 
 def observable(wire: int, inverse_clifford: Clifford) -> monoprop.PauliOperator:
@@ -216,12 +178,7 @@ def main() -> None:
     started = perf_counter()
     scv_prep, body = load(args.circuits / "x_100_SCV.qasm")
     meson_prep, _ = load(args.circuits / "x_100_meson.qasm")
-    rotations, final_clifford = to_rotations(body)
-    rotations = fuse(rotations)
-    circuits = {
-        "SCV": build_circuit(rotations, scv_prep),
-        "meson": build_circuit(rotations, meson_prep),
-    }
+    circuits, final_clifford = reduce(body, {"SCV": scv_prep, "meson": meson_prep})
     inverse_clifford = final_clifford.adjoint()
     prepared = perf_counter()
 
@@ -250,7 +207,7 @@ def main() -> None:
 
     print(f"atol         {args.atol:.0e}")
     print(f"cutoff       {args.cutoff}")
-    print(f"rotations    {len(rotations):,}")
+    print(f"rotations    {len(circuits['SCV'].gates):,}")
     print(f"n_f          {n_f:.6f}")
     print(f"Q(SCV)       {charges['SCV']:.6f}   (exact: {NUM_SITES})")
     print(f"Q(meson)     {charges['meson']:.6f}   (exact: {NUM_SITES})")
